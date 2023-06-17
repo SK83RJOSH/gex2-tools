@@ -1,0 +1,10 @@
+[package]
+name = "gex2-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.71"
+binrw = "0.11.2"
+bitflags = "2.3.2"
+image = "0.24.6"
