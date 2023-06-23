@@ -1,7 +1,6 @@
-use binrw::{BinRead, BinWrite};
+use binrw::binrw;
 
-#[repr(C)]
-#[derive(BinRead, BinWrite)]
+#[binrw]
 #[brw(little)]
 pub struct File {
     pub texture_count: u32,
@@ -9,9 +8,10 @@ pub struct File {
     pub textures: Vec<Texture>,
 }
 
-#[repr(C)]
-#[derive(BinRead, BinWrite)]
-#[brw(little, assert(size_0 == size_1), assert(data_count_0 == data_count_1))]
+#[binrw]
+#[brw(little)]
+#[br(assert(size_0 == size_1))]
+#[br(assert(data_count_0 == data_count_1))]
 pub struct Texture {
     pub size_0: u32,
     pub size_1: u32,
@@ -22,14 +22,15 @@ pub struct Texture {
     pub rgb_0: [Rgb; 4],
     pub rgb_1: [Rgb; 4],
     pub unk_1: [u16; 24],
+    #[bw(try_calc(u32::try_from(data.len())))]
     pub data_count_0: u32,
+    #[bw(try_calc(u32::try_from(data.len())))]
     pub data_count_1: u32,
     #[br(count = data_count_0)]
     pub data: Vec<u8>,
 }
 
-#[repr(u32)]
-#[derive(BinRead, BinWrite)]
+#[binrw]
 #[brw(little, repr(u32))]
 pub enum TextureFormat {
     RGB8A1 = 1,
@@ -37,8 +38,7 @@ pub enum TextureFormat {
     ARGB4 = 12,
 }
 
-#[repr(C)]
-#[derive(BinRead, BinWrite)]
+#[binrw]
 #[brw(little)]
 pub struct Rgb {
     pub r: i16,
@@ -46,18 +46,17 @@ pub struct Rgb {
     pub b: i16,
 }
 
-#[repr(C)]
 pub struct TextureProperties {
     pub width: u32,
     pub height: u32,
-    pub stride: u32,
+    pub data_bpp: usize,
 }
 
 impl TextureProperties {
     pub fn from_texture(texture: &Texture) -> TextureProperties {
         let size = 1 << (8 - texture.size_1);
         let aspect_ratio = texture.aspect_ratio;
-        let stride = match texture.format {
+        let data_bpp = match texture.format {
             TextureFormat::R7G6B5A1 | TextureFormat::ARGB4 => 2,
             _ => 1,
         };
@@ -65,13 +64,13 @@ impl TextureProperties {
             TextureProperties {
                 width: size >> (aspect_ratio - 3),
                 height: size,
-                stride,
+                data_bpp,
             }
         } else {
             TextureProperties {
                 width: size,
                 height: size >> (3 - aspect_ratio),
-                stride,
+                data_bpp,
             }
         }
     }
@@ -81,49 +80,8 @@ impl TextureProperties {
     }
 
     fn data_length(&self) -> usize {
-        (self.width * self.height * self.stride) as usize
+        self.pixel_count() * self.data_bpp
     }
-}
-
-fn decompress_r7g6b5a1(data: &[u8], properties: &TextureProperties) -> Vec<u8> {
-    let mut result = Vec::with_capacity(properties.pixel_count());
-    for x in 0..properties.width {
-        for y in 0..properties.height {
-            let i = 2 * (y + x * properties.height) as usize;
-            let p = data[i] as u32 | (data[i + 1] as u32) << 8;
-            let r = ((p & 0x7C00) >> 7) as u8;
-            let g = ((p & 0x3E0) >> 2) as u8;
-            let b = ((p & 0x1F) << 3) as u8;
-            let a = match (p & 0x7FFF) == 0 || (p & 0x8000) == 0 {
-                true => 0,
-                false => 255,
-            };
-            result.push(r);
-            result.push(g);
-            result.push(b);
-            result.push(a);
-        }
-    }
-    result
-}
-
-fn decompress_argb4(data: &[u8], properties: &TextureProperties) -> Vec<u8> {
-    let mut result = Vec::with_capacity(properties.pixel_count());
-    for x in 0..properties.width {
-        for y in 0..properties.height {
-            let i = 2 * (y + x * properties.height) as usize;
-            let p = data[i] as u32 | (data[i + 1] as u32) << 8;
-            let r = ((p & 0xF00) >> 4) as u8;
-            let g = (p & 0xF0) as u8;
-            let b = ((p & 0xF) << 4) as u8;
-            let a = ((p & 0xF000) >> 8) as u8;
-            result.push(r);
-            result.push(g);
-            result.push(b);
-            result.push(a);
-        }
-    }
-    result
 }
 
 fn decompress_rgb8a1(
@@ -177,21 +135,68 @@ fn decompress_rgb8a1(
     result
 }
 
-pub fn decompress(texture: &Texture) -> anyhow::Result<Vec<u8>, ()> {
+fn decompress_r7g6b5a1(data: &[u8], properties: &TextureProperties) -> Vec<u8> {
+    let mut result = Vec::with_capacity(properties.pixel_count());
+    for x in 0..properties.width {
+        for y in 0..properties.height {
+            let i = 2 * (y + x * properties.height) as usize;
+            let p = data[i] as u32 | (data[i + 1] as u32) << 8;
+            let r = ((p & 0x7C00) >> 7) as u8;
+            let g = ((p & 0x3E0) >> 2) as u8;
+            let b = ((p & 0x1F) << 3) as u8;
+            let a = match (p & 0x7FFF) == 0 || (p & 0x8000) == 0 {
+                true => 0,
+                false => 255,
+            };
+            result.push(r);
+            result.push(g);
+            result.push(b);
+            result.push(a);
+        }
+    }
+    result
+}
+
+fn decompress_argb4(data: &[u8], properties: &TextureProperties) -> Vec<u8> {
+    let mut result = Vec::with_capacity(properties.pixel_count());
+    for x in 0..properties.width {
+        for y in 0..properties.height {
+            let i = 2 * (y + x * properties.height) as usize;
+            let p = data[i] as u32 | (data[i + 1] as u32) << 8;
+            let a = ((p & 0xF000) >> 8) as u8;
+            let r = ((p & 0xF00) >> 4) as u8;
+            let g = (p & 0xF0) as u8;
+            let b = ((p & 0xF) << 4) as u8;
+            result.push(r);
+            result.push(g);
+            result.push(b);
+            result.push(a);
+        }
+    }
+    result
+}
+
+#[derive(Debug)]
+pub enum DecompressionError {
+    InvalidTextureData,
+}
+
+type DecompressionResult<T> = std::result::Result<T, DecompressionError>;
+
+pub fn decompress(texture: &Texture) -> DecompressionResult<Vec<u8>> {
     let properties = TextureProperties::from_texture(texture);
-    let expected_data_length = properties.data_length();
-    if texture.data.len() != expected_data_length {
-        return Err(()); // TODO: Return a reasonable error here
+    if texture.data.len() != properties.data_length() {
+        return Err(DecompressionError::InvalidTextureData);
     }
     match texture.format {
-        TextureFormat::R7G6B5A1 => Ok(decompress_r7g6b5a1(&texture.data, &properties)),
-        TextureFormat::ARGB4 => Ok(decompress_argb4(&texture.data, &properties)),
         TextureFormat::RGB8A1 => Ok(decompress_rgb8a1(
             &texture.data,
             &properties,
             &texture.brightness,
             &texture.rgb_0,
-            &texture.rgb_1
+            &texture.rgb_1,
         )),
+        TextureFormat::R7G6B5A1 => Ok(decompress_r7g6b5a1(&texture.data, &properties)),
+        TextureFormat::ARGB4 => Ok(decompress_argb4(&texture.data, &properties)),
     }
 }
